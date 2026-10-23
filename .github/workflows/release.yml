@@ -1,0 +1,242 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      linux_asset: ${{ steps.meta.outputs.linux_asset }}
+      windows_asset: ${{ steps.meta.outputs.windows_asset }}
+      should_publish: ${{ steps.existing.outputs.publish }}
+
+    steps:
+      - name: Resolve tag and version
+        id: meta
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG:-$REF_NAME}"
+          case "$tag" in
+            v*) ;;
+            *) echo "Release tag must start with v: $tag" >&2; exit 1 ;;
+          esac
+          version="${tag#v}"
+          case "$version" in
+            ''|*[!0-9A-Za-z.+-]*)
+              echo "Invalid release version: $version" >&2
+              exit 1
+              ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "linux_asset=gscvm-${version}-linux-x86_64.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "windows_asset=gscvm-${version}-windows-x86_64.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Check existing release assets
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          LINUX_ASSET: ${{ steps.meta.outputs.linux_asset }}
+          WINDOWS_ASSET: ${{ steps.meta.outputs.windows_asset }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+          missing=0
+          for asset in "$LINUX_ASSET" "$WINDOWS_ASSET"; do
+            if ! grep -Fxq "$asset" <<< "$assets"; then
+              missing=1
+            fi
+          done
+          if [ "$missing" -eq 0 ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already contains both assets; skipping."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG is missing assets; rebuilding and uploading."
+          fi
+
+  build-linux:
+    name: Build Linux release
+    needs: preflight
+    if: needs.preflight.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Run examples
+        run: |
+          set -euo pipefail
+          for example in basics threads include main; do
+            ./build/gscvm "examples/${example}.gsc"
+          done
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-ctest-logs-linux
+          path: build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          ASSET: ${{ needs.preflight.outputs.linux_asset }}
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/gscvm-${VERSION}-linux-x86_64"
+          cmake --install build --prefix "$stage"
+          cp build/gsc-tool "$stage/bin/"
+          mkdir -p "$stage/share/gscvm"
+          cp -R examples "$stage/share/gscvm/examples"
+          cp -R docs "$stage/share/gscvm/docs"
+          cp README.md NOTICE.md LICENSE "$stage/share/gscvm/"
+          tar -czf "$ASSET" -C "$RUNNER_TEMP" "$(basename "$stage")"
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: ${{ needs.preflight.outputs.linux_asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+  build-windows:
+    name: Build Windows release
+    needs: preflight
+    if: needs.preflight.outputs.should_publish == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DGSCVM_BUILD_UPSTREAM_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Run examples
+        shell: pwsh
+        run: |
+          $examples = @("basics", "threads", "include", "main")
+          foreach ($example in $examples) {
+            & "build\Release\gscvm.exe" "examples\$example.gsc"
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-ctest-logs-windows
+          path: build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+      - name: Package
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          ASSET: ${{ needs.preflight.outputs.windows_asset }}
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "gscvm-$env:VERSION-windows-x86_64"
+          cmake --install build --config Release --prefix $stage
+          Copy-Item "build\Release\gsc-tool.exe" "$stage\bin\"
+          New-Item -ItemType Directory -Force "$stage\share\gscvm" | Out-Null
+          Copy-Item "examples" "$stage\share\gscvm\examples" -Recurse
+          Copy-Item "docs" "$stage\share\gscvm\docs" -Recurse
+          Copy-Item -Path "README.md", "NOTICE.md", "LICENSE" -Destination "$stage\share\gscvm\"
+          Compress-Archive -Path $stage -DestinationPath $env:ASSET -CompressionLevel Optimal
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: ${{ needs.preflight.outputs.windows_asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release assets
+    needs:
+      - preflight
+      - build-linux
+      - build-windows
+    if: needs.preflight.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Linux asset
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux
+          path: dist
+
+      - name: Download Windows asset
+        uses: actions/download-artifact@v4
+        with:
+          name: release-windows
+          path: dist
+
+      - name: Upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --verify-tag --title "$TAG" --generate-notes
+          fi
