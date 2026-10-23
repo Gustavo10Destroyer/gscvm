@@ -153,3 +153,11 @@ gscvm currently implements the T6 dialect only. The upstream compiler,
 disassembler and opcode tables are reused, but the interpreter, scheduler and
 public API are T6-specific. Extending to another dialect would require a new
 module decoder/IR mapping and opcode semantics, not just a new Host.
+
+The IW/T6 engine runtime is not included. Most engine natives, the level
+lifecycle, entity classes, physics, AI, assets, UI and networking must be
+supplied by the host or registered as natives. Engine entities created by
+`spawn()` have not been ported and there are no current plans to implement them;
+`spawnstruct()` only creates a generic VM object. See
+[Engine compatibility](compatibility.md) for the boundary and how to report a
+discrepancy.

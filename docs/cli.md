@@ -71,7 +71,7 @@ runner prints the requested data and exits without executing the script.
 
 ## Includes and dependencies
 
-Source scripts may use `#include` and `#using`. The VM resolves them against the
+Source scripts may use `#include`. The VM resolves includes against the
 current module's directory, the configured search paths, the host loader and the
 in-memory virtual files. The runner loads the entry module's declared
 dependencies before invoking the entry function. A dependency failure is printed
@@ -96,6 +96,10 @@ The upstream `gsc-tool` is built for fixture generation:
   `isfloat()` are provided by the VM or its built-in natives.
 - A deadlock (for example a thread waiting on an event that is never notified)
   raises a runtime error with the waiting thread, function and event.
+
+The runner does not provide the full engine runtime. Unregistered engine
+functions fail as unresolved imports; see [compatibility.md](compatibility.md)
+for the engine boundary and how to report a discrepancy.
 
 ## Exit codes
 

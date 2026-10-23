@@ -41,9 +41,13 @@ The project is intentionally headless. Game-specific behaviour is supplied by a
   state inspection, memory accounting and instruction-level breakpoints/steps.
 - GPL-3.0-only, matching the upstream project.
 
-The implementation is not a byte-for-byte recreation of the shipped T6 engine.
-Semantics that could not be recovered from the compiler/decompiler are called out
-in [docs/opcodes.md](docs/opcodes.md).
+The implementation is not a byte-for-byte recreation of the shipped T6 engine,
+and it does not port the engine runtime. Engine entities created by `spawn()` are
+not implemented and there are no current plans to add them. Semantics that could
+not be recovered from the compiler/decompiler are called out in
+[docs/opcodes.md](docs/opcodes.md); see
+[docs/compatibility.md](docs/compatibility.md) for the engine boundary and
+issue-reporting guidance.
 
 ## Building
 
@@ -121,7 +125,7 @@ The playground workflow is:
    the canonical virtual path (or null) and understands extensionless requests.
 3. Load an entry file with `gscvm_load_file(path, name)`, or load bytes directly
    with `gscvm_load_module(name, ptr, size)`. Call `gscvm_load_dependencies(name)`
-   before executing scripts that use `#include`/`#using`.
+   before executing scripts that use `#include`.
 4. Execute with `gscvm_call(module, function)` for a complete run, or
    `gscvm_start` + `gscvm_run_until_idle`/`gscvm_tick`/`gscvm_notify` for
    cooperative control. `gscvm_set_execution_mode(1)` selects fixed-step tick

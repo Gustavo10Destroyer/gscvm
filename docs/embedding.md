@@ -76,7 +76,7 @@ path to `load_module_file()`; the WASM API exposes the same operation as
 `gscvm_load_source`.
 
 After loading, call `load_dependencies(module)` before execution if the script
-declares `#include` or `#using` dependencies. The loader records includes and
+declares `#include` dependencies. The loader records includes and
 functions in `ModuleInfo`, exposes disassembly through `disassembly(name)`, and
 retains the original bytes through `module_bytes(name)`.
 
