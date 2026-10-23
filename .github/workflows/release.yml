@@ -97,7 +97,7 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --parallel
+        run: cmake --build build --parallel 2
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
@@ -144,7 +144,7 @@ jobs:
     name: Build Windows release
     needs: preflight
     if: needs.preflight.outputs.should_publish == 'true'
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 30
 
     steps:
@@ -157,7 +157,7 @@ jobs:
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DGSCVM_BUILD_UPSTREAM_TESTS=OFF
 
       - name: Build
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build --config Release --parallel 2
 
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
