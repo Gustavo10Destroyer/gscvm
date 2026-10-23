@@ -247,7 +247,7 @@ public:
     auto search_paths() const -> std::vector<std::filesystem::path> const&;
 
     // In-memory script files. These are checked before the host and filesystem
-    // loaders, and are also used when resolving #include/#using dependencies.
+    // loaders, and are also used when resolving #include dependencies.
     // Paths use forward slashes and may be relative to any configured search
     // path. `resolve_virtual_path` returns the canonical in-memory path.
     auto add_virtual_file(std::string path, std::span<std::uint8_t const> data) -> void;

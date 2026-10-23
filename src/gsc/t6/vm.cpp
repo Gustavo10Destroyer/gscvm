@@ -92,7 +92,7 @@ auto parent_path(std::string_view path) -> std::string
 }
 
 // Unlike normalize_path this keeps extensions because virtual files are also
-// used for #include/#using headers (.gsh).
+// used for #include headers (.gsh).
 auto normalize_virtual_path(std::string_view path) -> std::string
 {
     auto out = std::string{ path };
