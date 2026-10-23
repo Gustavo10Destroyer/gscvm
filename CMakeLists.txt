@@ -61,7 +61,9 @@ set(UPSTREAM_INCLUDES
 file(GLOB XSK_ZLIB_SOURCES CONFIGURE_DEPENDS "${UPSTREAM_DIR}/deps/zlib/*.c")
 add_library(xsk_zlib STATIC ${XSK_ZLIB_SOURCES})
 target_include_directories(xsk_zlib PUBLIC "${UPSTREAM_DIR}/deps/zlib")
-target_compile_definitions(xsk_zlib PRIVATE HAVE_UNISTD_H)
+if(NOT WIN32)
+    target_compile_definitions(xsk_zlib PRIVATE HAVE_UNISTD_H)
+endif()
 set_target_properties(xsk_zlib PROPERTIES C_STANDARD 99)
 
 # ---------------------------------------------------------------------------
@@ -243,7 +245,11 @@ if(GSCVM_BUILD_TESTS OR GSCVM_BUILD_UPSTREAM_TESTS)
     )
     target_include_directories(xsk_catch2 PUBLIC "${UPSTREAM_DIR}/deps/catch2/extras")
     target_compile_definitions(xsk_catch2 PUBLIC CATCH_AMALGAMATED_CUSTOM_MAIN)
-    target_compile_options(xsk_catch2 PRIVATE -w)
+    if(MSVC)
+        target_compile_options(xsk_catch2 PRIVATE /w)
+    else()
+        target_compile_options(xsk_catch2 PRIVATE -w)
+    endif()
 
     set(GSCVM_TEST_SOURCES)
     if(GSCVM_BUILD_UPSTREAM_TESTS)
