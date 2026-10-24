@@ -143,3 +143,56 @@ jobs:
             NOTICE.md
           if-no-files-found: error
           retention-days: 14
+
+  wasm:
+    name: WebAssembly
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Emscripten
+        uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: 6.0.13
+          actions-cache-folder: emsdk-cache
+
+      - name: Configure
+        run: emcmake cmake -S . -B build-wasm -DGSCVM_BUILD_WASM=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-wasm --parallel 2
+
+      - name: Smoke test
+        run: |
+          node - <<'JS'
+          const createGscvmModule = require('./build-wasm/gscvm.js');
+          createGscvmModule().then((Module) => {
+            const ok = Module._gscvm_init();
+            if (ok !== 1) throw new Error(`gscvm_init returned ${ok}`);
+            Module._gscvm_shutdown();
+            console.log('wasm smoke test passed');
+          }).catch((error) => {
+            console.error(error);
+            process.exit(1);
+          });
+          JS
+
+      - name: Upload WebAssembly
+        uses: actions/upload-artifact@v4
+        with:
+          name: gscvm-wasm
+          path: |
+            build-wasm/gscvm.js
+            build-wasm/gscvm.wasm
+          if-no-files-found: error
+          retention-days: 14

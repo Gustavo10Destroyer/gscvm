@@ -31,6 +31,9 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       linux_asset: ${{ steps.meta.outputs.linux_asset }}
       windows_asset: ${{ steps.meta.outputs.windows_asset }}
+      wasm_asset: ${{ steps.meta.outputs.wasm_asset }}
+      wasm_js_asset: ${{ steps.meta.outputs.wasm_js_asset }}
+      wasm_binary_asset: ${{ steps.meta.outputs.wasm_binary_asset }}
       should_publish: ${{ steps.existing.outputs.publish }}
 
     steps:
@@ -53,6 +56,9 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "linux_asset=gscvm-${version}-linux-x86_64.tar.gz" >> "$GITHUB_OUTPUT"
           echo "windows_asset=gscvm-${version}-windows-x86_64.zip" >> "$GITHUB_OUTPUT"
+          echo "wasm_asset=gscvm-${version}-wasm.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "wasm_js_asset=gscvm.js" >> "$GITHUB_OUTPUT"
+          echo "wasm_binary_asset=gscvm.wasm" >> "$GITHUB_OUTPUT"
 
       - name: Check existing release assets
         id: existing
@@ -62,6 +68,9 @@ jobs:
           TAG: ${{ steps.meta.outputs.tag }}
           LINUX_ASSET: ${{ steps.meta.outputs.linux_asset }}
           WINDOWS_ASSET: ${{ steps.meta.outputs.windows_asset }}
+          WASM_ASSET: ${{ steps.meta.outputs.wasm_asset }}
+          WASM_JS_ASSET: ${{ steps.meta.outputs.wasm_js_asset }}
+          WASM_BINARY_ASSET: ${{ steps.meta.outputs.wasm_binary_asset }}
         run: |
           set -euo pipefail
           if ! gh release view "$TAG" >/dev/null 2>&1; then
@@ -70,14 +79,15 @@ jobs:
           fi
           assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
           missing=0
-          for asset in "$LINUX_ASSET" "$WINDOWS_ASSET"; do
+          for asset in "$LINUX_ASSET" "$WINDOWS_ASSET" \
+            "$WASM_ASSET" "$WASM_JS_ASSET" "$WASM_BINARY_ASSET"; do
             if ! grep -Fxq "$asset" <<< "$assets"; then
               missing=1
             fi
           done
           if [ "$missing" -eq 0 ]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG already contains both assets; skipping."
+            echo "Release $TAG already contains all assets; skipping."
           else
             echo "publish=true" >> "$GITHUB_OUTPUT"
             echo "Release $TAG is missing assets; rebuilding and uploading."
@@ -209,12 +219,80 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-wasm:
+    name: Build WebAssembly release
+    needs: preflight
+    if: needs.preflight.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+          submodules: recursive
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Emscripten
+        uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: 6.0.13
+          actions-cache-folder: emsdk-cache
+
+      - name: Configure
+        run: emcmake cmake -S . -B build-wasm -DGSCVM_BUILD_WASM=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-wasm --parallel 2
+
+      - name: Smoke test
+        run: |
+          node - <<'JS'
+          const createGscvmModule = require('./build-wasm/gscvm.js');
+          createGscvmModule().then((Module) => {
+            const ok = Module._gscvm_init();
+            if (ok !== 1) throw new Error(`gscvm_init returned ${ok}`);
+            Module._gscvm_shutdown();
+            console.log('wasm smoke test passed');
+          }).catch((error) => {
+            console.error(error);
+            process.exit(1);
+          });
+          JS
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          WASM_ASSET: ${{ needs.preflight.outputs.wasm_asset }}
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/gscvm-${VERSION}-wasm"
+          mkdir -p "$stage" dist-wasm
+          cp build-wasm/gscvm.js build-wasm/gscvm.wasm "$stage/"
+          cp README.md NOTICE.md LICENSE "$stage/"
+          cp build-wasm/gscvm.js build-wasm/gscvm.wasm dist-wasm/
+          tar -czf "dist-wasm/$WASM_ASSET" -C "$RUNNER_TEMP" "$(basename "$stage")"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-wasm
+          path: dist-wasm/*
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Publish release assets
     needs:
       - preflight
       - build-linux
       - build-windows
+      - build-wasm
     if: needs.preflight.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -231,6 +309,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: release-windows
+          path: dist
+
+      - name: Download WebAssembly assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-wasm
           path: dist
 
       - name: Upload assets
