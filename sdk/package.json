@@ -1,0 +1,31 @@
+{
+  "name": "gscvm",
+  "version": "0.1.0",
+  "description": "JavaScript SDK for the gscvm Call of Duty: Black Ops II GSC virtual machine",
+  "type": "module",
+  "main": "./gscvm.mjs",
+  "types": "./gscvm.d.ts",
+  "exports": {
+    ".": {
+      "types": "./gscvm.d.ts",
+      "import": "./gscvm.mjs"
+    }
+  },
+  "files": [
+    "gscvm.mjs",
+    "gscvm.d.ts",
+    "README.md"
+  ],
+  "keywords": [
+    "gsc",
+    "gscvm",
+    "call-of-duty",
+    "black-ops-2",
+    "t6",
+    "webassembly"
+  ],
+  "license": "GPL-3.0-only",
+  "scripts": {
+    "test": "node test/wasm.mjs"
+  }
+}

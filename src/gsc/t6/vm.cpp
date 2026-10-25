@@ -821,6 +821,8 @@ struct DebugRuntime
     bool stepping{};
     std::uint64_t paused_thread{};
     std::uint64_t step_thread{};
+    std::uint64_t skip_breakpoint_thread{};
+    std::size_t skip_breakpoint_pc{};
     std::vector<BreakpointInfo> breakpoints;
 };
 
@@ -1548,10 +1550,17 @@ struct VM::Impl
                 return;
             }
 
-            // Stepping deliberately ignores breakpoints on the instruction that
-            // is about to execute; otherwise step would never get past one.
+            // Stepping and the first instruction after a resume deliberately
+            // ignore the breakpoint that has already been reported; otherwise
+            // execution could never get past it.
             auto const stepping_this_thread = debug.stepping && debug.step_thread == thread.id;
-            if (!stepping_this_thread && breakpoint_hit(frame))
+            auto skip_breakpoint = debug.skip_breakpoint_thread == thread.id && debug.skip_breakpoint_pc == frame.pc;
+            if (skip_breakpoint)
+            {
+                debug.skip_breakpoint_thread = 0;
+                debug.skip_breakpoint_pc = 0;
+            }
+            if (!stepping_this_thread && !skip_breakpoint && breakpoint_hit(frame))
             {
                 pause_thread(thread);
                 return;
@@ -3020,6 +3029,8 @@ auto VM::time() const -> double { return impl_->clock; }
 
 auto VM::set_instruction_limit(std::size_t limit) -> void { impl_->cfg.instruction_limit = limit; }
 auto VM::set_max_call_depth(std::size_t depth) -> void { impl_->cfg.max_call_depth = depth; }
+auto VM::set_max_stack_size(std::size_t size) -> void { impl_->cfg.max_stack_size = size; }
+auto VM::set_max_threads(std::size_t count) -> void { impl_->cfg.max_threads = count; }
 
 auto VM::set_execution_mode(ExecutionMode mode) -> void
 {
@@ -3037,7 +3048,19 @@ auto VM::set_tick_rate(double ticks_per_second) -> void
     impl_->cfg.tick_rate = ticks_per_second;
 }
 
+auto VM::set_frame_time(double seconds) -> void
+{
+    if (!(seconds > 0.0) || !std::isfinite(seconds))
+        throw Error("frame time must be a positive finite number");
+
+    impl_->cfg.frame_time = seconds;
+}
+
 auto VM::set_real_time(bool enabled) -> void { impl_->cfg.real_time = enabled; }
+
+auto VM::set_instance(Instance instance) -> void { impl_->cfg.instance = instance; }
+auto VM::set_execute_devblocks(bool enabled) -> void { impl_->cfg.execute_devblocks = enabled; }
+auto VM::set_t6_fixup(bool enabled) -> void { impl_->cfg.t6_fixup = enabled; }
 
 auto VM::instruction_count() const -> std::size_t { return impl_->executed; }
 
@@ -3655,6 +3678,8 @@ auto VM::step() -> std::size_t
     impl_->debug.paused_thread = 0;
     impl_->debug.stepping = true;
     impl_->debug.step_thread = thread->id;
+    impl_->debug.skip_breakpoint_thread = 0;
+    impl_->debug.skip_breakpoint_pc = 0;
     thread->status = ThreadStatus::ready;
 
     auto budget = impl_->cfg.instruction_limit == 0 ? std::numeric_limits<std::size_t>::max() : impl_->cfg.instruction_limit;
@@ -3690,6 +3715,11 @@ auto VM::resume() -> std::size_t
         if (thread && thread->status == ThreadStatus::paused)
         {
             primary = thread->id;
+            if (!thread->frames.empty())
+            {
+                impl_->debug.skip_breakpoint_thread = thread->id;
+                impl_->debug.skip_breakpoint_pc = thread->frames.back().pc;
+            }
             thread->status = ThreadStatus::ready;
         }
         impl_->debug.paused = false;

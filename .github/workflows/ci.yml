@@ -14,6 +14,7 @@ on:
       - src/**
       - include/**
       - tools/**
+      - sdk/**
       - test/**
       - examples/**
       - scripts/**
@@ -30,6 +31,7 @@ on:
       - src/**
       - include/**
       - tools/**
+      - sdk/**
       - test/**
       - examples/**
       - scripts/**
@@ -187,6 +189,9 @@ jobs:
           });
           JS
 
+      - name: SDK test
+        run: node sdk/test/wasm.mjs
+
       - name: Upload WebAssembly
         uses: actions/upload-artifact@v4
         with:
@@ -194,5 +199,6 @@ jobs:
           path: |
             build-wasm/gscvm.js
             build-wasm/gscvm.wasm
+            sdk/**
           if-no-files-found: error
           retention-days: 14

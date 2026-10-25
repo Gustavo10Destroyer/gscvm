@@ -39,6 +39,8 @@ The project is intentionally headless. Game-specific behaviour is supplied by a
 - Per-VM native registry with typed argument access.
 - Emscripten WebAssembly target with in-memory files/search paths, structured
   state inspection, memory accounting and instruction-level breakpoints/steps.
+- ES module JavaScript SDK with automatic value marshalling, JavaScript
+  natives, host service callbacks, cooperative threads and debugging helpers.
 - GPL-3.0-only, matching the upstream project.
 
 The implementation is not a byte-for-byte recreation of the shipped T6 engine,
@@ -87,19 +89,64 @@ cmake --build build-wasm -j
 ```
 
 Copy `build-wasm/gscvm.js` and `build-wasm/gscvm.wasm` next to the playground.
-Load the loader with a classic script tag, then initialize one VM:
+
+The JavaScript SDK in [`sdk/`](sdk/) wraps the C API, value marshalling,
+JavaScript natives, host callbacks, threads, inspection and debugging. It is an
+ES module. Load the Emscripten loader as a classic script, then import the SDK:
 
 ```html
 <script src="gscvm.js"></script>
-<script>
-const Module = await createGscvmModule();
-Module._gscvm_init(); // 1 on success, 0 on failure
+<script type="module">
+import { createVM } from './sdk/gscvm.mjs';
+
+const vm = await createVM({
+  moduleOptions: { locateFile: (file) => `./${file}` },
+  host: {
+    dvar(name) {
+      return name === 'scr_xscale' ? 1.5 : undefined;
+    }
+  }
+});
+
+vm.registerNative('jsadd', (ctx, a, b) => a + b);
+vm.loadSource('main', `
+main() {
+  println("hello &&1", 42);
+  return jsadd(20, 22);
+}
+`);
+
+const result = vm.call('main', 'main');
+console.log(result.toJS(), vm.takeOutput());
+vm.close();
 </script>
 ```
 
-The C API uses UTF-8 strings and JSON results. Functions that return `char*`
-allocate memory owned by the caller; release it with `Module._gscvm_free(ptr)`.
-Use `Module.stringToUTF8`/`Module.lengthBytesUTF8` to create input strings and
+In Node.js, load the Emscripten module with `createRequire` and pass it as
+`factory` (or create it yourself and pass `module`). See
+[`sdk/README.md`](sdk/README.md) and [`sdk/gscvm.d.ts`](sdk/gscvm.d.ts) for the
+full API, including host objects, cooperative threads, globals, object access,
+breakpoints and memory inspection.
+
+The browser playground creates a fresh VM for every run and executes a
+user-editable `bootstrap.js` before the selected script. Use it to register
+natives and bind browser APIs:
+
+```js
+async function bootstrap({ vm, host }) {
+  vm.registerNative('jsadd', (_ctx, a, b) => a + b);
+  host.level = () => ({ name: 'playground' });
+}
+```
+
+The bootstrap function may be async, for example to prefetch data with `fetch`,
+but native callbacks must be synchronous. See the WebAssembly guide in the
+documentation site for complete networking and localStorage examples.
+
+The lower-level C API remains available for custom integrations. It uses UTF-8
+strings and JSON results. Functions that return `char*` allocate memory owned by
+the caller; release it with `Module._gscvm_free(ptr)`. Use
+`Module.stringToUTF8`/`Module.lengthBytesUTF8` to create input strings and
 `Module.UTF8ToString` to read results. A small helper for JSON-returning calls:
 
 ```js
@@ -116,7 +163,7 @@ callJson('gscvm_load_dependencies', ['string'], ['main']);
 const run = callJson('gscvm_start', ['string', 'string'], ['main', 'main']);
 ```
 
-The playground workflow is:
+The lower-level workflow is:
 
 1. Add source/bytecode files with `gscvm_add_source(path, text)` or
    `gscvm_add_file(path, ptr, size)`. Paths use forward slashes.

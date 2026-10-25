@@ -158,7 +158,13 @@ endif()
 # Browser WebAssembly module (Emscripten)
 # ---------------------------------------------------------------------------
 if(GSCVM_BUILD_WASM)
-    add_executable(gscvm_wasm "${CMAKE_CURRENT_SOURCE_DIR}/tools/wasm.cpp")
+    add_executable(gscvm_wasm
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/wasm.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/wasm_bridge.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/wasm_host.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/wasm_json.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/wasm_value.cpp"
+    )
     set_target_properties(gscvm_wasm PROPERTIES
         OUTPUT_NAME "gscvm"
         SUFFIX ".js"
@@ -167,32 +173,76 @@ if(GSCVM_BUILD_WASM)
 
     set(GSCVM_WASM_EXPORTS
         _gscvm_init
+        _gscvm_init_ex
         _gscvm_shutdown
+        _gscvm_set_js_host
+        _gscvm_config
+        _gscvm_set_instance
+        _gscvm_set_frame_time
         _gscvm_set_real_time
         _gscvm_set_tick_rate
         _gscvm_set_execution_mode
         _gscvm_set_instruction_limit
+        _gscvm_set_max_call_depth
+        _gscvm_set_max_stack_size
+        _gscvm_set_max_threads
+        _gscvm_set_execute_devblocks
+        _gscvm_set_t6_fixup
+        _gscvm_set_debug_enabled
         _gscvm_add_search_path
         _gscvm_clear_search_paths
+        _gscvm_search_paths
         _gscvm_add_file
         _gscvm_add_source
         _gscvm_remove_file
         _gscvm_clear_files
         _gscvm_list_files
+        _gscvm_read_file
         _gscvm_resolve_path
         _gscvm_load_file
         _gscvm_load_source
         _gscvm_load_module
         _gscvm_load_dependencies
+        _gscvm_has_module
+        _gscvm_module_info
         _gscvm_call
+        _gscvm_call_values
+        _gscvm_call_function
         _gscvm_start
+        _gscvm_start_values
+        _gscvm_start_function
+        _gscvm_thread_status
+        _gscvm_thread_result_values
         _gscvm_tick
         _gscvm_run_until_idle
         _gscvm_run_until_complete
         _gscvm_notify
+        _gscvm_notify_values
+        _gscvm_time
+        _gscvm_instruction_count
+        _gscvm_has_runnable_threads
+        _gscvm_has_live_threads
         _gscvm_threads
         _gscvm_thread_info
         _gscvm_globals
+        _gscvm_inspect_value
+        _gscvm_get_global
+        _gscvm_set_global
+        _gscvm_object
+        _gscvm_object_get_field
+        _gscvm_object_set_field
+        _gscvm_object_clear_field
+        _gscvm_object_has_field
+        _gscvm_object_keys
+        _gscvm_object_get_index
+        _gscvm_object_set_index
+        _gscvm_object_clear_index
+        _gscvm_object_size
+        _gscvm_register_js_native
+        _gscvm_unregister_native
+        _gscvm_has_native
+        _gscvm_natives
+        _gscvm_set_dvar
         _gscvm_memory_stats
         _gscvm_memory_blocks
         _gscvm_modules
@@ -214,6 +264,7 @@ if(GSCVM_BUILD_WASM)
     string(JOIN "," GSCVM_WASM_EXPORTS_CSV ${GSCVM_WASM_EXPORTS})
 
     target_link_options(gscvm_wasm PRIVATE
+        "-lembind"
         "-sMODULARIZE=1"
         "-sEXPORT_NAME=createGscvmModule"
         "-sENVIRONMENT=web,worker,node"

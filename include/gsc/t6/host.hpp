@@ -59,7 +59,7 @@ public:
 
 // Small headless host: logs to stderr, keeps an in-memory dvar table and loads
 // scripts from the VM's search paths.
-class DefaultHost final : public Host
+class DefaultHost : public Host
 {
 public:
     auto log(LogLevel level, std::string_view message) -> void override;

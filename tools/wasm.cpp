@@ -3,10 +3,12 @@
 // Use of this source code is governed by a GNU GPLv3 license
 // that can be found in the LICENSE file.
 
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <format>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -16,52 +18,22 @@
 
 #include "gsc/gscvm.hpp"
 
+#include "wasm_bridge.hpp"
+#include "wasm_host.hpp"
+#include "wasm_json.hpp"
+#include "wasm_value.hpp"
+
 namespace
 {
 
 using namespace gsc::t6;
 using gsc::Error;
+using gsc::wasm::Json;
+using gsc::wasm::WasmHost;
 
 std::unique_ptr<VM> vm;
-std::string output;
 std::string last_error;
-
-auto quote(std::string_view text) -> std::string
-{
-    auto out = std::string{ "\"" };
-    out.reserve(text.size() + 2);
-    for (auto const c : text)
-    {
-        switch (c)
-        {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b"; break;
-            case '\f': out += "\\f"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20)
-                    out += std::format("\\u{:04x}", static_cast<unsigned char>(c));
-                else
-                    out.push_back(c);
-                break;
-        }
-    }
-    out.push_back('"');
-    return out;
-}
-
-auto json_string(std::string const& value) -> std::string
-{
-    return quote(value);
-}
-
-auto json_bool(bool value) -> std::string
-{
-    return value ? "true" : "false";
-}
+int pending_host_id{};
 
 auto make_string(std::string text) -> char*
 {
@@ -75,7 +47,7 @@ auto make_string(std::string text) -> char*
 
 auto error_json(std::string_view message) -> std::string
 {
-    return std::format("{{\"ok\":false,\"error\":{}}}", json_string(std::string{ message }));
+    return std::format("{{\"ok\":false,\"error\":{}}}", gsc::wasm::json_quote(message));
 }
 
 auto ok_json() -> std::string
@@ -103,13 +75,13 @@ auto status_name(ThreadStatus status) -> std::string_view
 
 auto value_json(Value const& value) -> std::string
 {
-    return std::format("{{\"type\":{},\"value\":{}}}", json_string(std::string{ value.type_name() }), json_string(value.to_display_string()));
+    return std::format("{{\"type\":{},\"value\":{}}}", gsc::wasm::json_quote(value.type_name()), gsc::wasm::json_quote(value.to_display_string()));
 }
 
 auto variable_json(VariableInfo const& value) -> std::string
 {
     auto out = std::format("{{\"name\":{},\"type\":{},\"value\":{},\"expandable\":{},\"childCount\":{}",
-        json_string(value.name), json_string(value.type), json_string(value.value), json_bool(value.expandable), value.child_count);
+        gsc::wasm::json_quote(value.name), gsc::wasm::json_quote(value.type), gsc::wasm::json_quote(value.value), value.expandable ? "true" : "false", value.child_count);
 
     if (!value.children.empty())
     {
@@ -143,15 +115,15 @@ auto variables_json(std::span<VariableInfo const> values) -> std::string
 auto frame_json(FrameInfo const& frame) -> std::string
 {
     return std::format("{{\"module\":{},\"function\":{},\"pc\":{},\"offset\":{},\"opcode\":{},\"maxStack\":{},\"locals\":{},\"varargs\":{},\"stack\":{}}}",
-        json_string(frame.module), json_string(frame.function), frame.pc, frame.offset, json_string(frame.opcode), frame.max_stack,
+        gsc::wasm::json_quote(frame.module), gsc::wasm::json_quote(frame.function), frame.pc, frame.offset, gsc::wasm::json_quote(frame.opcode), frame.max_stack,
         variables_json(frame.locals), variables_json(frame.varargs), variables_json(frame.stack));
 }
 
 auto thread_json(ThreadInfo const& thread) -> std::string
 {
     auto out = std::format("{{\"id\":{},\"status\":{},\"wakeTime\":{},\"waitEvent\":{},\"waitTarget\":{},\"result\":{},\"error\":{},\"endonCount\":{},\"frames\":[",
-        thread.thread.id, json_string(std::string{ status_name(thread.status) }), thread.wake_time,
-        json_string(thread.wait_event), json_string(thread.wait_target), json_string(thread.result), json_string(thread.error), thread.endon_count);
+        thread.thread.id, gsc::wasm::json_quote(status_name(thread.status)), thread.wake_time,
+        gsc::wasm::json_quote(thread.wait_event), gsc::wasm::json_quote(thread.wait_target), gsc::wasm::json_quote(thread.result), gsc::wasm::json_quote(thread.error), thread.endon_count);
 
     for (std::size_t i = 0; i < thread.frames.size(); i++)
     {
@@ -167,14 +139,14 @@ auto thread_json(ThreadInfo const& thread) -> std::string
 auto breakpoint_json(BreakpointInfo const& breakpoint) -> std::string
 {
     return std::format("{{\"module\":{},\"function\":{},\"pc\":{}}}",
-        json_string(breakpoint.module), json_string(breakpoint.function), breakpoint.pc);
+        gsc::wasm::json_quote(breakpoint.module), gsc::wasm::json_quote(breakpoint.function), breakpoint.pc);
 }
 
 auto debug_json(DebugState const& state) -> std::string
 {
     auto out = std::format("{{\"enabled\":{},\"paused\":{},\"thread\":{},\"module\":{},\"function\":{},\"pc\":{},\"offset\":{},\"opcode\":{},\"breakpoints\":[",
-        json_bool(state.enabled), json_bool(state.paused), state.thread.id, json_string(state.module), json_string(state.function),
-        state.pc, state.offset, json_string(state.opcode));
+        state.enabled ? "true" : "false", state.paused ? "true" : "false", state.thread.id, gsc::wasm::json_quote(state.module), gsc::wasm::json_quote(state.function),
+        state.pc, state.offset, gsc::wasm::json_quote(state.opcode));
 
     for (std::size_t i = 0; i < state.breakpoints.size(); i++)
     {
@@ -197,17 +169,17 @@ auto memory_stats_json(MemoryStats const& stats) -> std::string
 auto memory_block_json(MemoryBlockInfo const& block) -> std::string
 {
     return std::format("{{\"kind\":{},\"name\":{},\"size\":{},\"previewHex\":{}}}",
-        json_string(block.kind), json_string(block.name), block.size, json_string(block.preview_hex));
+        gsc::wasm::json_quote(block.kind), gsc::wasm::json_quote(block.name), block.size, gsc::wasm::json_quote(block.preview_hex));
 }
 
 auto module_json(ModuleInfo const& info) -> std::string
 {
-    auto out = std::format("{{\"name\":{},\"includes\":[", json_string(info.name));
+    auto out = std::format("{{\"name\":{},\"includes\":[", gsc::wasm::json_quote(info.name));
     for (std::size_t i = 0; i < info.includes.size(); i++)
     {
         if (i != 0)
             out.push_back(',');
-        out += json_string(info.includes[i]);
+        out += gsc::wasm::json_quote(info.includes[i]);
     }
     out += "],\"functions\":[";
     for (std::size_t i = 0; i < info.functions.size(); i++)
@@ -216,7 +188,7 @@ auto module_json(ModuleInfo const& info) -> std::string
         if (i != 0)
             out.push_back(',');
         out += std::format("{{\"name\":{},\"space\":{},\"params\":{},\"flags\":{},\"offset\":{},\"size\":{}}}",
-            json_string(function.name), json_string(function.space), function.params, function.flags, function.offset, function.size);
+            gsc::wasm::json_quote(function.name), gsc::wasm::json_quote(function.space), function.params, function.flags, function.offset, function.size);
     }
     out += "]}";
     return out;
@@ -240,18 +212,110 @@ auto require_vm() -> VM&
     return *vm;
 }
 
-class PlaygroundHost final : public Host
+auto wasm_host() -> WasmHost*
 {
-public:
-    auto log(LogLevel level, std::string_view message) -> void override
+    if (!vm)
+        return nullptr;
+    return dynamic_cast<WasmHost*>(&vm->host());
+}
+
+auto append_output(std::string_view text) -> void
+{
+    if (auto* host = wasm_host())
+        host->append_output(text);
+}
+
+auto config_json(VMConfig const& config) -> std::string
+{
+    auto out = Json::make_object();
+    out.set("instance", Json{ config.instance == Instance::client ? "client" : "server" });
+    out.set("executionMode", Json{ config.execution_mode == ExecutionMode::tick_based ? "tick_based" : "real_time" });
+    out.set("tickRate", Json{ config.tick_rate });
+    out.set("frameTime", Json{ config.frame_time });
+    out.set("realTime", Json{ config.real_time });
+    out.set("instructionLimit", Json{ static_cast<double>(config.instruction_limit) });
+    out.set("maxCallDepth", Json{ static_cast<double>(config.max_call_depth) });
+    out.set("maxStackSize", Json{ static_cast<double>(config.max_stack_size) });
+    out.set("maxThreads", Json{ static_cast<double>(config.max_threads) });
+    out.set("executeDevblocks", Json{ config.execute_devblocks });
+    out.set("t6Fixup", Json{ config.t6_fixup });
+    out.set("hostId", Json{ pending_host_id });
+    auto paths = Json::make_array();
+    for (auto const& path : config.search_paths)
+        paths.append(Json{ path.generic_string() });
+    out.set("searchPaths", std::move(paths));
+    return gsc::wasm::stringify_json(out);
+}
+
+auto apply_config(VMConfig& config, Json const& value) -> void
+{
+    if (!value.is_object())
+        throw Error("configuration must be a JSON object");
+
+    if (auto const* field = value.find("instance"))
     {
-        output += "[";
-        output.append(log_level_name(level));
-        output += "] ";
-        output.append(message);
-        output.push_back('\n');
+        if (field->is_string())
+            config.instance = field->string == "client" ? Instance::client : Instance::server;
+        else if (field->is_number())
+            config.instance = static_cast<int>(field->number) == 1 ? Instance::client : Instance::server;
     }
-};
+    if (auto const* field = value.find("executionMode"))
+    {
+        if (field->is_string())
+            config.execution_mode = field->string == "tick_based" || field->string == "tick" ? ExecutionMode::tick_based : ExecutionMode::real_time;
+        else if (field->is_number())
+            config.execution_mode = static_cast<int>(field->number) == 1 ? ExecutionMode::tick_based : ExecutionMode::real_time;
+    }
+    if (auto const* field = value.find("tickRate"); field && field->is_number())
+        config.tick_rate = field->number;
+    if (auto const* field = value.find("frameTime"); field && field->is_number())
+        config.frame_time = field->number;
+    if (auto const* field = value.find("realTime"); field && field->is_boolean())
+        config.real_time = field->boolean;
+    if (auto const* field = value.find("instructionLimit"); field && field->is_number())
+        config.instruction_limit = static_cast<std::size_t>(field->number);
+    if (auto const* field = value.find("maxCallDepth"); field && field->is_number())
+        config.max_call_depth = static_cast<std::size_t>(field->number);
+    if (auto const* field = value.find("maxStackSize"); field && field->is_number())
+        config.max_stack_size = static_cast<std::size_t>(field->number);
+    if (auto const* field = value.find("maxThreads"); field && field->is_number())
+        config.max_threads = static_cast<std::size_t>(field->number);
+    if (auto const* field = value.find("executeDevblocks"); field && field->is_boolean())
+        config.execute_devblocks = field->boolean;
+    if (auto const* field = value.find("t6Fixup"); field && field->is_boolean())
+        config.t6_fixup = field->boolean;
+    if (auto const* field = value.find("searchPaths"); field && field->is_array())
+    {
+        config.search_paths.clear();
+        for (auto const& path : field->array)
+        {
+            if (!path.is_string())
+                throw Error("searchPaths entries must be strings");
+            config.search_paths.emplace_back(path.string);
+        }
+    }
+}
+
+auto object_for_kind(std::string_view kind) -> ObjectPtr
+{
+    auto& instance = require_vm();
+    if (kind == "level")
+        return instance.level_object();
+    if (kind == "game")
+        return instance.game_object();
+    if (kind == "world")
+        return instance.world_object();
+    if (kind == "classes")
+        return instance.classes_object();
+    if (kind == "anim")
+        return instance.anim_object();
+    throw Error(std::format("unknown object '{}'", kind));
+}
+
+auto values_span(std::vector<Value> const& values) -> std::span<Value const>
+{
+    return std::span<Value const>{ values.data(), values.size() };
+}
 
 auto register_print(std::string_view name, bool newline) -> void
 {
@@ -260,20 +324,59 @@ auto register_print(std::string_view name, bool newline) -> void
         auto arguments = std::vector<Value>{};
         for (std::size_t i = 1; i < context.argument_count(); i++)
             arguments.push_back(context.argument(i));
-        output += format_message(format, arguments);
+        append_output(format_message(format, arguments));
         if (newline)
-            output.push_back('\n');
+            append_output("\n");
     });
 }
 
-auto create_vm() -> void
+auto register_js_native(std::string_view space, std::string_view name, int callback_id) -> void
+{
+    require_vm().natives().register_function(space, name, [callback_id](NativeContext& context) {
+        auto meta = Json::make_object();
+        meta.set("space", Json{ std::string{ context.function_space() } });
+        meta.set("name", Json{ std::string{ context.function_name() } });
+        meta.set("threadId", Json{ static_cast<double>(context.thread_id()) });
+        meta.set("self", gsc::wasm::encode_value(context.self()));
+
+        auto args = std::vector<Value>{};
+        args.reserve(context.argument_count());
+        for (std::size_t i = 0; i < context.argument_count(); i++)
+            args.push_back(context.argument(i));
+
+        auto result = gsc::wasm::js_native_call(
+            callback_id,
+            gsc::wasm::stringify_json(meta),
+            gsc::wasm::stringify_json(gsc::wasm::encode_values(values_span(args))));
+
+        if (result.empty())
+        {
+            context.return_undefined();
+            return;
+        }
+
+        auto value = gsc::wasm::parse_json(result);
+        if (value.is_object())
+        {
+            if (auto const* error = value.find("$gscError"); error && error->is_string())
+                context.error(error->string);
+        }
+        context.set_return_value(gsc::wasm::decode_value(value));
+    });
+}
+
+auto create_vm(Json const* options) -> void
 {
     auto config = VMConfig{};
     config.real_time = false;
     config.execution_mode = ExecutionMode::real_time;
-    config.host = std::make_shared<PlaygroundHost>();
-    vm = std::make_unique<VM>(config);
-    output.clear();
+    if (options)
+        apply_config(config, *options);
+
+    auto host = std::make_shared<WasmHost>(pending_host_id);
+    config.host = host;
+
+    vm = std::make_unique<VM>(std::move(config));
     last_error.clear();
 
     register_print("print", false);
@@ -291,11 +394,52 @@ auto create_vm() -> void
 extern "C"
 {
 
+int gscvm_init_ex(const char* config_text);
+
 EMSCRIPTEN_KEEPALIVE int gscvm_init()
+{
+    return gscvm_init_ex(nullptr);
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_init_ex(const char* config_text)
 {
     try
     {
-        create_vm();
+        auto options = std::optional<Json>{};
+        if (config_text && *config_text)
+            options = gsc::wasm::parse_json(config_text);
+        create_vm(options ? &*options : nullptr);
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        vm.reset();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE void gscvm_shutdown()
+{
+    vm.reset();
+    pending_host_id = 0;
+    last_error.clear();
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_set_js_host(int host_id)
+{
+    try
+    {
+        pending_host_id = host_id;
+        if (vm)
+        {
+            auto* host = dynamic_cast<WasmHost*>(&vm->host());
+            if (host)
+            {
+                host->set_host_id(host_id);
+                vm->set_host(vm->config().host);
+            }
+        }
         return 1;
     }
     catch (std::exception const& error)
@@ -305,10 +449,44 @@ EMSCRIPTEN_KEEPALIVE int gscvm_init()
     }
 }
 
-EMSCRIPTEN_KEEPALIVE void gscvm_shutdown()
+EMSCRIPTEN_KEEPALIVE char* gscvm_config()
 {
-    vm.reset();
-    output.clear();
+    try
+    {
+        return result_json(config_json(require_vm().config()));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_set_instance(int client)
+{
+    try
+    {
+        require_vm().set_instance(client != 0 ? Instance::client : Instance::server);
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_set_frame_time(double seconds)
+{
+    try
+    {
+        require_vm().set_frame_time(seconds);
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
 }
 
 EMSCRIPTEN_KEEPALIVE int gscvm_set_real_time(int enabled)
@@ -367,6 +545,90 @@ EMSCRIPTEN_KEEPALIVE int gscvm_set_instruction_limit(unsigned int limit)
     }
 }
 
+EMSCRIPTEN_KEEPALIVE int gscvm_set_max_call_depth(unsigned int depth)
+{
+    try
+    {
+        require_vm().set_max_call_depth(depth);
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_set_max_stack_size(unsigned int size)
+{
+    try
+    {
+        require_vm().set_max_stack_size(size);
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_set_max_threads(unsigned int count)
+{
+    try
+    {
+        require_vm().set_max_threads(count);
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_set_execute_devblocks(int enabled)
+{
+    try
+    {
+        require_vm().set_execute_devblocks(enabled != 0);
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_set_t6_fixup(int enabled)
+{
+    try
+    {
+        require_vm().set_t6_fixup(enabled != 0);
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_set_debug_enabled(int enabled)
+{
+    try
+    {
+        require_vm().set_debug_enabled(enabled != 0);
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
 EMSCRIPTEN_KEEPALIVE int gscvm_add_search_path(const char* path)
 {
     try
@@ -392,6 +654,22 @@ EMSCRIPTEN_KEEPALIVE void gscvm_clear_search_paths()
     catch (std::exception const& error)
     {
         last_error = error.what();
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_search_paths()
+{
+    try
+    {
+        auto const paths = require_vm().search_paths();
+        auto out = Json::make_array();
+        for (auto const& path : paths)
+            out.append(Json{ path.generic_string() });
+        return result_json(gsc::wasm::stringify_json(out));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
     }
 }
 
@@ -460,15 +738,34 @@ EMSCRIPTEN_KEEPALIVE char* gscvm_list_files()
     try
     {
         auto const files = require_vm().virtual_files();
-        auto out = std::string{ "[" };
-        for (std::size_t i = 0; i < files.size(); i++)
-        {
-            if (i != 0)
-                out.push_back(',');
-            out += json_string(files[i]);
-        }
-        out.push_back(']');
-        return result_json(std::move(out));
+        auto out = Json::make_array();
+        for (auto const& file : files)
+            out.append(Json{ file });
+        return result_json(gsc::wasm::stringify_json(out));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_read_file(const char* path)
+{
+    try
+    {
+        if (!path)
+            return result_json(error_json("missing path"));
+        auto const data = require_vm().read_virtual_file(path);
+        if (!data)
+            return result_json(error_json(std::format("unknown file '{}'", path)));
+        auto bytes = Json::make_array();
+        for (auto const byte : *data)
+            bytes.append(Json{ static_cast<double>(byte) });
+        auto out = Json::make_object();
+        out.set("ok", Json{ true });
+        out.set("path", Json{ std::string{ path } });
+        out.set("data", std::move(bytes));
+        return result_json(gsc::wasm::stringify_json(out));
     }
     catch (std::exception const& error)
     {
@@ -560,6 +857,35 @@ EMSCRIPTEN_KEEPALIVE char* gscvm_load_dependencies(const char* module)
     }
 }
 
+EMSCRIPTEN_KEEPALIVE int gscvm_has_module(const char* module)
+{
+    try
+    {
+        if (!module)
+            return 0;
+        return require_vm().has_module(module) ? 1 : 0;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_module_info(const char* module)
+{
+    try
+    {
+        if (!module)
+            return result_json(error_json("missing module"));
+        return result_json(module_json(require_vm().module_info(module)));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
 EMSCRIPTEN_KEEPALIVE char* gscvm_call(const char* module, const char* function)
 {
     try
@@ -575,6 +901,43 @@ EMSCRIPTEN_KEEPALIVE char* gscvm_call(const char* module, const char* function)
     }
 }
 
+EMSCRIPTEN_KEEPALIVE char* gscvm_call_values(const char* module, const char* function, const char* args_json)
+{
+    try
+    {
+        if (!function)
+            return result_json(error_json("missing function"));
+        auto args = args_json && *args_json ? gsc::wasm::values_from_json(args_json) : std::vector<Value>{};
+        auto value = module && *module
+            ? require_vm().call(module, function, values_span(args))
+            : require_vm().call(function, values_span(args));
+        return result_json(std::format("{{\"ok\":true,\"result\":{}}}", gsc::wasm::value_json(value)));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_call_function(const char* function_json, const char* args_json)
+{
+    try
+    {
+        if (!function_json)
+            return result_json(error_json("missing function"));
+        auto function = gsc::wasm::value_from_json(function_json);
+        if (!function.is_function())
+            return result_json(error_json("value is not a function"));
+        auto args = args_json && *args_json ? gsc::wasm::values_from_json(args_json) : std::vector<Value>{};
+        auto value = require_vm().call(function.as_function(), values_span(args));
+        return result_json(std::format("{{\"ok\":true,\"result\":{}}}", gsc::wasm::value_json(value)));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
 EMSCRIPTEN_KEEPALIVE char* gscvm_start(const char* module, const char* function)
 {
     try
@@ -583,6 +946,70 @@ EMSCRIPTEN_KEEPALIVE char* gscvm_start(const char* module, const char* function)
             return result_json(error_json("missing function"));
         auto const thread = module && *module ? require_vm().start(module, function) : require_vm().start(std::string_view{}, function);
         return result_json(std::format("{{\"ok\":true,\"thread\":{}}}", thread.id));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_start_values(const char* module, const char* function, const char* args_json)
+{
+    try
+    {
+        if (!function)
+            return result_json(error_json("missing function"));
+        auto args = args_json && *args_json ? gsc::wasm::values_from_json(args_json) : std::vector<Value>{};
+        auto const thread = module && *module
+            ? require_vm().start(module, function, values_span(args))
+            : require_vm().start(module ? module : "", function, values_span(args));
+        return result_json(std::format("{{\"ok\":true,\"thread\":{}}}", thread.id));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_start_function(const char* function_json, const char* args_json)
+{
+    try
+    {
+        if (!function_json)
+            return result_json(error_json("missing function"));
+        auto function = gsc::wasm::value_from_json(function_json);
+        if (!function.is_function())
+            return result_json(error_json("value is not a function"));
+        auto args = args_json && *args_json ? gsc::wasm::values_from_json(args_json) : std::vector<Value>{};
+        auto const thread = require_vm().start(function.as_function(), values_span(args));
+        return result_json(std::format("{{\"ok\":true,\"thread\":{}}}", thread.id));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_thread_status(unsigned int id)
+{
+    try
+    {
+        auto out = Json::make_object();
+        out.set("ok", Json{ true });
+        out.set("status", Json{ std::string{ status_name(require_vm().thread_status(ThreadRef{ id })) } });
+        return result_json(gsc::wasm::stringify_json(out));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_thread_result_values(unsigned int id)
+{
+    try
+    {
+        return result_json(gsc::wasm::value_json(require_vm().thread_result(ThreadRef{ id })));
     }
     catch (std::exception const& error)
     {
@@ -645,6 +1072,43 @@ EMSCRIPTEN_KEEPALIVE char* gscvm_notify(const char* event)
     }
 }
 
+EMSCRIPTEN_KEEPALIVE char* gscvm_notify_values(const char* target_json, const char* event, const char* args_json)
+{
+    try
+    {
+        if (!event)
+            return result_json(error_json("missing event"));
+        auto target = target_json && *target_json ? gsc::wasm::value_from_json(target_json) : Value::object(require_vm().level_object());
+        auto args = args_json && *args_json ? gsc::wasm::values_from_json(args_json) : std::vector<Value>{};
+        auto const count = require_vm().notify(target, event, values_span(args));
+        return result_json(std::format("{{\"ok\":true,\"resumed\":{}}}", count));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE double gscvm_time()
+{
+    return vm ? vm->time() : 0.0;
+}
+
+EMSCRIPTEN_KEEPALIVE double gscvm_instruction_count()
+{
+    return vm ? static_cast<double>(vm->instruction_count()) : 0.0;
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_has_runnable_threads()
+{
+    return vm && vm->has_runnable_threads() ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_has_live_threads()
+{
+    return vm && vm->has_live_threads() ? 1 : 0;
+}
+
 EMSCRIPTEN_KEEPALIVE char* gscvm_threads()
 {
     try
@@ -687,6 +1151,287 @@ EMSCRIPTEN_KEEPALIVE char* gscvm_globals()
     catch (std::exception const& error)
     {
         return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_inspect_value(const char* value_json_text, unsigned int max_depth, unsigned int max_items)
+{
+    try
+    {
+        if (!value_json_text)
+            return result_json(error_json("missing value"));
+        auto options = InspectOptions{};
+        if (max_depth != 0)
+            options.max_depth = max_depth;
+        if (max_items != 0)
+            options.max_items = max_items;
+        auto const value = gsc::wasm::value_from_json(value_json_text);
+        return result_json(variable_json(require_vm().inspect_value(value, options)));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_get_global(const char* name)
+{
+    try
+    {
+        if (!name)
+            return result_json(error_json("missing name"));
+        return result_json(gsc::wasm::value_json(require_vm().get_global(name)));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_set_global(const char* name, const char* value_json_text)
+{
+    try
+    {
+        if (!name || !value_json_text)
+            return 0;
+        require_vm().set_global(name, gsc::wasm::value_from_json(value_json_text));
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_object(const char* kind)
+{
+    try
+    {
+        if (!kind)
+            return result_json(error_json("missing kind"));
+        return result_json(gsc::wasm::value_json(Value::object(object_for_kind(kind))));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_object_get_field(const char* kind, const char* name)
+{
+    try
+    {
+        if (!kind || !name)
+            return result_json(error_json("missing kind or name"));
+        auto object = object_for_kind(kind);
+        return result_json(gsc::wasm::value_json(object->get_field(name)));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_object_set_field(const char* kind, const char* name, const char* value_json_text)
+{
+    try
+    {
+        if (!kind || !name || !value_json_text)
+            return 0;
+        object_for_kind(kind)->set_field(name, gsc::wasm::value_from_json(value_json_text));
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_object_clear_field(const char* kind, const char* name)
+{
+    try
+    {
+        if (!kind || !name)
+            return 0;
+        return object_for_kind(kind)->clear_field(name) ? 1 : 0;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_object_has_field(const char* kind, const char* name)
+{
+    try
+    {
+        if (!kind || !name)
+            return 0;
+        return object_for_kind(kind)->has_field(name) ? 1 : 0;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_object_keys(const char* kind)
+{
+    try
+    {
+        if (!kind)
+            return result_json(error_json("missing kind"));
+        auto const keys = object_for_kind(kind)->keys();
+        return result_json(std::format("{{\"ok\":true,\"keys\":{}}}", gsc::wasm::stringify_json(gsc::wasm::encode_values(keys))));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_object_get_index(const char* kind, const char* key_json)
+{
+    try
+    {
+        if (!kind || !key_json)
+            return result_json(error_json("missing kind or key"));
+        auto object = object_for_kind(kind);
+        return result_json(gsc::wasm::value_json(object->get_index(gsc::wasm::value_from_json(key_json))));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_object_set_index(const char* kind, const char* key_json, const char* value_json_text)
+{
+    try
+    {
+        if (!kind || !key_json || !value_json_text)
+            return 0;
+        object_for_kind(kind)->set_index(gsc::wasm::value_from_json(key_json), gsc::wasm::value_from_json(value_json_text));
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_object_clear_index(const char* kind, const char* key_json)
+{
+    try
+    {
+        if (!kind || !key_json)
+            return 0;
+        return object_for_kind(kind)->clear_index(gsc::wasm::value_from_json(key_json)) ? 1 : 0;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_object_size(const char* kind)
+{
+    try
+    {
+        if (!kind)
+            return 0;
+        return static_cast<int>(object_for_kind(kind)->size());
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_register_js_native(const char* space, const char* name, int callback_id)
+{
+    try
+    {
+        if (!name || callback_id <= 0)
+            return 0;
+        register_js_native(space ? space : "", name, callback_id);
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_unregister_native(const char* space, const char* name)
+{
+    try
+    {
+        if (!name)
+            return 0;
+        return require_vm().natives().unregister_function(space ? space : "", name) ? 1 : 0;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_has_native(const char* space, const char* name)
+{
+    try
+    {
+        if (!name)
+            return 0;
+        return require_vm().natives().contains(space ? space : "", name) ? 1 : 0;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE char* gscvm_natives()
+{
+    try
+    {
+        auto out = Json::make_array();
+        for (auto const& name : require_vm().natives().names())
+            out.append(Json{ name });
+        return result_json(gsc::wasm::stringify_json(out));
+    }
+    catch (std::exception const& error)
+    {
+        return error_result(error);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE int gscvm_set_dvar(const char* name, const char* value_json_text)
+{
+    try
+    {
+        if (!name || !value_json_text)
+            return 0;
+        auto* host = wasm_host();
+        if (!host)
+            throw Error("default host is unavailable");
+        host->set_dvar(name, gsc::wasm::value_from_json(value_json_text));
+        return 1;
+    }
+    catch (std::exception const& error)
+    {
+        last_error = error.what();
+        return 0;
     }
 }
 
@@ -790,7 +1535,7 @@ EMSCRIPTEN_KEEPALIVE char* gscvm_set_breakpoint(const char* module, const char* 
         if (!function)
             return result_json(error_json("missing function"));
         auto const ok = require_vm().set_breakpoint(module ? module : "", function, pc);
-        return result_json(std::format("{{\"ok\":{},\"debug\":{}}}", json_bool(ok), debug_json(require_vm().debug_state())));
+        return result_json(std::format("{{\"ok\":{},\"debug\":{}}}", ok ? "true" : "false", debug_json(require_vm().debug_state())));
     }
     catch (std::exception const& error)
     {
@@ -885,8 +1630,9 @@ EMSCRIPTEN_KEEPALIVE char* gscvm_pause()
 
 EMSCRIPTEN_KEEPALIVE char* gscvm_take_output()
 {
-    auto out = std::move(output);
-    output.clear();
+    auto out = std::string{};
+    if (auto* host = wasm_host())
+        out = host->take_output();
     return make_string(std::move(out));
 }
 

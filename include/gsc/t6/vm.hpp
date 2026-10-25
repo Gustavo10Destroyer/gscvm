@@ -333,9 +333,15 @@ public:
 
     auto set_instruction_limit(std::size_t limit) -> void;
     auto set_max_call_depth(std::size_t depth) -> void;
+    auto set_max_stack_size(std::size_t size) -> void;
+    auto set_max_threads(std::size_t count) -> void;
     auto set_execution_mode(ExecutionMode mode) -> void;
     auto set_tick_rate(double ticks_per_second) -> void;
+    auto set_frame_time(double seconds) -> void;
     auto set_real_time(bool enabled) -> void;
+    auto set_instance(Instance instance) -> void;
+    auto set_execute_devblocks(bool enabled) -> void;
+    auto set_t6_fixup(bool enabled) -> void;
     auto instruction_count() const -> std::size_t;
 
     // Engine singletons / globals. Level fields are the T6 global-variable

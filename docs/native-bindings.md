@@ -133,6 +133,7 @@ same thread that drives the VM.
 
 The command-line runner registers `print`, `println`, `iprintln`,
 `iprintlnbold` and `gettime`. The WASM target registers the print family and
-`gettime` as well, routing output through `gscvm_take_output()`. Other natives
-are the embedder's responsibility, which keeps the VM headless and free of
-engine assumptions.
+`gettime` as well, routing output through `gscvm_take_output()`. WebAssembly
+embedders can add JavaScript natives with the SDK's `registerNative()` or the
+lower-level `gscvm_register_js_native()`. Other natives are the embedder's
+responsibility, which keeps the VM headless and free of engine assumptions.
