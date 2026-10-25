@@ -177,6 +177,10 @@ vm.registerNative('make_pair', (ctx, left, right) => ({
 }));
 ```
 
+Namespaced natives are called as `space::name` from GSC. The T6 compiler records
+the space as an include, but `loadDependencies()` recognizes registered native
+spaces, so a missing `space.gsc` module is not treated as an error.
+
 Use `ctx.error('message')` to raise a script-visible runtime error. Enough
 information is available to identify the call:
 

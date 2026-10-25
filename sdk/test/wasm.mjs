@@ -32,6 +32,7 @@ try {
     value.self = value;
     return value;
   });
+  vm.registerNative('browser', 'storage', (_ctx, key) => `stored:${key}`);
 
   vm.loadSource('main', `
 main() {
@@ -48,6 +49,10 @@ worker() { wait 1; return jsadd(2, 3); }
   assert.equal(vm.call('main', 'main').toJS(), 3);
   assert.equal(level.hits, 1);
   assert.match(vm.takeOutput(), /add=42/);
+
+  vm.loadSource('namespaced', 'main() { return browser::storage("name"); }');
+  vm.loadDependencies('namespaced');
+  assert.equal(vm.call('namespaced', 'main').toJS(), 'stored:name');
 
   const cycle = vm.call('main', 'cycle').toJS();
   assert.equal(cycle.self, cycle);

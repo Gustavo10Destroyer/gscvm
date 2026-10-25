@@ -41,6 +41,21 @@ TEST_CASE("t6 dependencies load from search paths", "[gscvm]")
     REQUIRE(vm.call("dep", "main").as_integer() == 77);
 }
 
+TEST_CASE("t6 namespaced natives do not load a script module", "[gscvm]")
+{
+    auto vm = make_vm();
+    vm.natives().register_function("browser", "storage", [](NativeContext& context) {
+        context.set_return_value(Value::string(context.get_argument<std::string>(0)));
+    });
+
+    auto const source = std::string{ "main() { return browser::storage(\"name\"); }" };
+    vm.load_module("native_space", std::vector<std::uint8_t>{ source.begin(), source.end() });
+
+    REQUIRE_NOTHROW(vm.load_dependencies("native_space"));
+    REQUIRE_FALSE(vm.has_module("browser"));
+    REQUIRE(vm.call("native_space", "main").as_string() == "name");
+}
+
 TEST_CASE("t6 compiles source scripts on load", "[gscvm]")
 {
     auto vm = make_vm();

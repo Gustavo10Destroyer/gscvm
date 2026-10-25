@@ -60,6 +60,14 @@ auto NativeRegistry::contains(std::string_view space, std::string_view name) con
     return find(space, name) != nullptr;
 }
 
+auto NativeRegistry::contains_space(std::string_view space) const -> bool
+{
+    auto const prefix = lower(space) + "::";
+    return std::any_of(functions_.begin(), functions_.end(), [&](auto const& entry) {
+        return entry.first.starts_with(prefix);
+    });
+}
+
 auto NativeRegistry::find(std::string_view space, std::string_view name) const -> NativeFunction const*
 {
     if (!space.empty())

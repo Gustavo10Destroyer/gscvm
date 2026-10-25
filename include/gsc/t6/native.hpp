@@ -38,6 +38,7 @@ public:
     auto unregister_function(std::string_view space, std::string_view name) -> bool;
     auto contains(std::string_view name) const -> bool;
     auto contains(std::string_view space, std::string_view name) const -> bool;
+    auto contains_space(std::string_view space) const -> bool;
 
     auto find(std::string_view space, std::string_view name) const -> NativeFunction const*;
 

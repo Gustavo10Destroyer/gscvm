@@ -2843,7 +2843,21 @@ auto VM::load_dependencies(std::string_view module_name) -> void
     {
         if (impl_->find_module(include))
             continue;
-        impl_->ensure_module(include);
+
+        try
+        {
+            impl_->ensure_module(include);
+        }
+        catch (Error const& error)
+        {
+            // T6 has no namespace feature, so the compiler records "space" in a
+            // namespaced function reference (for example browser::storage) as an
+            // include. It is a native namespace, not a script module.
+            auto const message = std::string_view{ error.what() };
+            if (impl_->registry.contains_space(include) && message.starts_with("could not load script module"))
+                continue;
+            throw;
+        }
     }
 }
 
