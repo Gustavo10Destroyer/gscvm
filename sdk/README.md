@@ -181,6 +181,10 @@ Namespaced natives are called as `space::name` from GSC. The T6 compiler records
 the space as an include, but `loadDependencies()` recognizes registered native
 spaces, so a missing `space.gsc` module is not treated as an error.
 
+Including a native space makes its natives available unqualified. If several
+included spaces define the same name, the first include wins; use `space::name`
+to select an exact native.
+
 Use `ctx.error('message')` to raise a script-visible runtime error. Enough
 information is available to identify the call:
 

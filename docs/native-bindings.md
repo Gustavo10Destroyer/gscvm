@@ -28,6 +28,21 @@ vm.natives().register_function("math", "clamp", [](NativeContext& ctx) {
 GSC calls the first as `echo(...)` and the second as `math::clamp(...)`.
 Registering the same canonical name again replaces the previous function.
 
+Including a native space makes its natives available unqualified:
+
+```gsc
+#include browser;
+
+main()
+{
+    return storage("name");
+}
+```
+
+If several included spaces define the same name, the first include wins.
+`space::name` always selects that exact native; it does not fall back to a bare
+native with the same name.
+
 ## Arguments
 
 `NativeContext` exposes the call as copied `Value` arguments:

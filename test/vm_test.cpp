@@ -56,6 +56,56 @@ TEST_CASE("t6 namespaced natives do not load a script module", "[gscvm]")
     REQUIRE(vm.call("native_space", "main").as_string() == "name");
 }
 
+TEST_CASE("t6 included native namespaces resolve unqualified calls in include order", "[gscvm]")
+{
+    auto vm = make_vm();
+    vm.natives().register_function("browser", "storage", [](NativeContext& context) {
+        context.set_return_value(Value::string("browser:" + context.get_argument<std::string>(0)));
+    });
+    vm.natives().register_function("other", "storage", [](NativeContext& context) {
+        context.set_return_value(Value::string("other:" + context.get_argument<std::string>(0)));
+    });
+
+    auto const source = std::string{
+        "#include browser;\n"
+        "#include other;\n"
+        "main() { return storage(\"name\"); }\n"
+        "qualified() { return other::storage(\"name\"); }\n"
+    };
+    vm.load_module("native_includes", std::vector<std::uint8_t>{ source.begin(), source.end() });
+
+    REQUIRE_NOTHROW(vm.load_dependencies("native_includes"));
+    REQUIRE(vm.call("native_includes", "main").as_string() == "browser:name");
+    REQUIRE(vm.call("native_includes", "qualified").as_string() == "other:name");
+
+    auto const reversed = std::string{
+        "#include other;\n"
+        "#include browser;\n"
+        "main() { return storage(\"name\"); }\n"
+    };
+    vm.load_module("native_includes_reversed", std::vector<std::uint8_t>{ reversed.begin(), reversed.end() });
+
+    REQUIRE_NOTHROW(vm.load_dependencies("native_includes_reversed"));
+    REQUIRE(vm.call("native_includes_reversed", "main").as_string() == "other:name");
+}
+
+TEST_CASE("t6 qualified native calls do not fall back to bare names", "[gscvm]")
+{
+    auto vm = make_vm();
+    vm.natives().register_function("storage", [](NativeContext& context) {
+        context.set_return_value(Value::string("bare"));
+    });
+    vm.natives().register_function("browser", "other", [](NativeContext& context) {
+        context.set_return_value(Value::string("other"));
+    });
+
+    auto const source = std::string{ "#include browser;\nmain() { return browser::storage(\"name\"); }\n" };
+    vm.load_module("qualified_native", std::vector<std::uint8_t>{ source.begin(), source.end() });
+
+    REQUIRE_NOTHROW(vm.load_dependencies("qualified_native"));
+    REQUIRE_THROWS_AS(vm.call("qualified_native", "main"), RuntimeError);
+}
+
 TEST_CASE("t6 compiles source scripts on load", "[gscvm]")
 {
     auto vm = make_vm();

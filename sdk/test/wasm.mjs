@@ -33,6 +33,7 @@ try {
     return value;
   });
   vm.registerNative('browser', 'storage', (_ctx, key) => `stored:${key}`);
+  vm.registerNative('other', 'storage', (_ctx, key) => `other:${key}`);
 
   vm.loadSource('main', `
 main() {
@@ -53,6 +54,24 @@ worker() { wait 1; return jsadd(2, 3); }
   vm.loadSource('namespaced', 'main() { return browser::storage("name"); }');
   vm.loadDependencies('namespaced');
   assert.equal(vm.call('namespaced', 'main').toJS(), 'stored:name');
+
+  vm.loadSource('included', `
+#include browser;
+#include other;
+main() { return storage("name"); }
+qualified() { return other::storage("name"); }
+`);
+  vm.loadDependencies('included');
+  assert.equal(vm.call('included', 'main').toJS(), 'stored:name');
+  assert.equal(vm.call('included', 'qualified').toJS(), 'other:name');
+
+  vm.loadSource('included_reversed', `
+#include other;
+#include browser;
+main() { return storage("name"); }
+`);
+  vm.loadDependencies('included_reversed');
+  assert.equal(vm.call('included_reversed', 'main').toJS(), 'other:name');
 
   const cycle = vm.call('main', 'cycle').toJS();
   assert.equal(cycle.self, cycle);

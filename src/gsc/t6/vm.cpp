@@ -882,6 +882,76 @@ struct VM::Impl
         return nullptr;
     }
 
+    struct NativeMatch
+    {
+        std::string space;
+        NativeFunction const* function{};
+
+        explicit operator bool() const { return function != nullptr; }
+    };
+
+    auto native_space_candidates(std::string_view include) const -> std::vector<std::string>
+    {
+        auto out = std::vector<std::string>{};
+        auto add = [&](std::string candidate) {
+            if (candidate.empty() || std::find(out.begin(), out.end(), candidate) != out.end())
+                return;
+            out.push_back(std::move(candidate));
+        };
+
+        add(std::string{ include });
+        auto const normalized = normalize_path(include);
+        add(normalized);
+        add(basename(normalized));
+        return out;
+    }
+
+    auto has_native_space(std::string_view include) const -> bool
+    {
+        for (auto const& candidate : native_space_candidates(include))
+        {
+            if (registry.contains_space(candidate))
+                return true;
+        }
+        return false;
+    }
+
+    auto module_for(std::string_view name) const -> Module const*
+    {
+        auto const key = name.empty() ? entry_module : std::string{ name };
+        if (key.empty())
+            return nullptr;
+        auto const module = find_module(key);
+        return module.get();
+    }
+
+    auto find_native(std::string_view space, std::string_view name, Module const* current) const -> NativeMatch
+    {
+        if (!space.empty())
+        {
+            if (auto const* function = registry.find(space, name))
+                return { std::string{ space }, function };
+            return {};
+        }
+
+        if (auto const* function = registry.find({}, name))
+            return { {}, function };
+
+        if (!current)
+            return {};
+
+        for (auto const& include : current->includes)
+        {
+            for (auto const& candidate : native_space_candidates(include))
+            {
+                if (auto const* function = registry.find(candidate, name))
+                    return { candidate, function };
+            }
+        }
+
+        return {};
+    }
+
     auto register_module(std::shared_ptr<Module> module, std::string_view requested) -> void
     {
         auto const index = modules.size();
@@ -1231,20 +1301,19 @@ struct VM::Impl
 
     auto invoke_native(Thread* thread, Frame* frame, Instruction const* instruction, Import const& import, std::vector<Value> args, Value self) -> Value
     {
-        auto const* function = registry.find(import.space, import.name);
-
-        if (!function && !import.space.empty())
-            function = registry.find({}, import.name);
-
-        if (!function)
+        auto const current = frame && frame->module ? frame->module.get() : module_for({});
+        auto const native = find_native(import.space, import.name, current);
+        if (!native)
             throw Error(std::format("unresolved native '{}'", import.space.empty() ? import.name : import.space + "::" + import.name));
+
+        auto const* function = native.function;
 
         auto impl = std::make_unique<NativeContext::Impl>();
         impl->vm = owner;
         impl->thread = thread ? thread->id : 0;
         impl->module = frame && frame->module ? frame->module->name : std::string{};
         impl->function = frame && frame->function ? frame->function->name : std::string{};
-        impl->space = import.space;
+        impl->space = native.space;
         impl->name = import.name;
         impl->offset = instruction ? instruction->offset : 0;
         impl->opcode = instruction ? instruction->name : std::string{};
@@ -1732,9 +1801,18 @@ struct VM::Impl
 
     auto call_function(FunctionRef const& ref, std::span<Value const> args) -> Value
     {
-        if (ref.kind == FunctionRef::Kind::native || (ref.kind == FunctionRef::Kind::unresolved && registry.find(ref.space, ref.name)))
+        auto const native = find_native(ref.space, ref.name, module_for(ref.module));
+        if (ref.kind == FunctionRef::Kind::native)
         {
-            auto import = Import{ .space = ref.space, .name = ref.name, .params = ref.params, .flags = ref.flags };
+            if (!native)
+                throw Error(std::format("unresolved native '{}'", ref.space.empty() ? ref.name : ref.space + "::" + ref.name));
+            auto import = Import{ .space = native.space, .name = ref.name, .params = ref.params, .flags = ref.flags };
+            return invoke_native(nullptr, nullptr, nullptr, import, std::vector<Value>{ args.begin(), args.end() }, Value::undefined());
+        }
+
+        if (ref.kind == FunctionRef::Kind::unresolved && native)
+        {
+            auto import = Import{ .space = native.space, .name = ref.name, .params = ref.params, .flags = ref.flags };
             return invoke_native(nullptr, nullptr, nullptr, import, std::vector<Value>{ args.begin(), args.end() }, Value::undefined());
         }
 
@@ -1915,14 +1993,17 @@ auto VM::Impl::execute(Thread& thread, Frame& frame, Instruction const& instruct
             ref.params = import.params;
             ref.flags = import.flags;
 
+            auto const native = find_native(import.space, import.name, frame.module.get());
+
             if (auto [module, function] = resolve_function({}, import.space, import.name, true); function)
             {
                 ref.kind = FunctionRef::Kind::script;
                 ref.module = module->name;
             }
-            else if (registry.find(import.space, import.name) || registry.find({}, import.name))
+            else if (native)
             {
                 ref.kind = FunctionRef::Kind::native;
+                ref.space = native.space;
             }
 
             frame.push(Value::function(std::move(ref)));
@@ -2468,9 +2549,12 @@ auto VM::Impl::execute(Thread& thread, Frame& frame, Instruction const& instruct
 
             if (!function)
             {
-                if (registry.find(import.space, import.name) || registry.find({}, import.name))
+                auto const native = find_native(import.space, import.name, frame.module.get());
+                if (native)
                 {
-                    auto result = invoke_native(&thread, &frame, &instruction, import, std::move(args), std::move(self));
+                    auto resolved = import;
+                    resolved.space = native.space;
+                    auto result = invoke_native(&thread, &frame, &instruction, resolved, std::move(args), std::move(self));
                     if (import.is_thread())
                         frame.push(Value::thread(add_finished_thread(std::move(result))));
                     else
@@ -2518,13 +2602,28 @@ auto VM::Impl::execute(Thread& thread, Frame& frame, Instruction const& instruct
                 throw Error(std::format("cannot call {}", target.type_name()));
 
             auto const& ref = target.as_function();
+            auto const native = find_native(ref.space, ref.name, frame.module.get());
+
+            if (ref.kind == FunctionRef::Kind::native)
+            {
+                if (!native)
+                    throw Error(std::format("unresolved native '{}'", ref.space.empty() ? ref.name : ref.space + "::" + ref.name));
+                auto const import = Import{ .space = native.space, .name = ref.name, .params = static_cast<std::uint8_t>(arg_count), .flags = ref.flags };
+                auto result = invoke_native(&thread, &frame, &instruction, import, std::move(args), std::move(self));
+                if (instruction.opcode == opcode::OP_ScriptThreadCallPointer || instruction.opcode == opcode::OP_ScriptMethodThreadCallPointer)
+                    frame.push(Value::thread(add_finished_thread(std::move(result))));
+                else
+                    frame.push(std::move(result));
+                return;
+            }
+
             auto [module, function] = resolve_function(ref.module, ref.space, ref.name, true);
 
             if (!function)
             {
-                auto const import = Import{ .space = ref.space, .name = ref.name, .params = static_cast<std::uint8_t>(arg_count), .flags = ref.flags };
-                if (registry.find(ref.space, ref.name) || registry.find({}, ref.name))
+                if (native)
                 {
+                    auto const import = Import{ .space = native.space, .name = ref.name, .params = static_cast<std::uint8_t>(arg_count), .flags = ref.flags };
                     auto result = invoke_native(&thread, &frame, &instruction, import, std::move(args), std::move(self));
                     if (instruction.opcode == opcode::OP_ScriptThreadCallPointer || instruction.opcode == opcode::OP_ScriptMethodThreadCallPointer)
                         frame.push(Value::thread(add_finished_thread(std::move(result))));
@@ -2685,9 +2784,10 @@ auto VM::Impl::execute(Thread& thread, Frame& frame, Instruction const& instruct
         case opcode::OP_GetAPIFunction:
         {
             auto const import = parse_import(instruction);
+            auto const native = find_native(import.space, import.name, frame.module.get());
             auto ref = FunctionRef{};
-            ref.kind = registry.find(import.space, import.name) || registry.find({}, import.name) ? FunctionRef::Kind::native : FunctionRef::Kind::unresolved;
-            ref.space = import.space;
+            ref.kind = native ? FunctionRef::Kind::native : FunctionRef::Kind::unresolved;
+            ref.space = native ? native.space : import.space;
             ref.name = import.name;
             ref.params = import.params;
             ref.flags = import.flags;
@@ -2854,7 +2954,7 @@ auto VM::load_dependencies(std::string_view module_name) -> void
             // namespaced function reference (for example browser::storage) as an
             // include. It is a native namespace, not a script module.
             auto const message = std::string_view{ error.what() };
-            if (impl_->registry.contains_space(include) && message.starts_with("could not load script module"))
+            if (impl_->has_native_space(include) && message.starts_with("could not load script module"))
                 continue;
             throw;
         }

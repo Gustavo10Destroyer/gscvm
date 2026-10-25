@@ -70,14 +70,7 @@ auto NativeRegistry::contains_space(std::string_view space) const -> bool
 
 auto NativeRegistry::find(std::string_view space, std::string_view name) const -> NativeFunction const*
 {
-    if (!space.empty())
-    {
-        auto const it = functions_.find(key_of(space, name));
-        if (it != functions_.end())
-            return &it->second;
-    }
-
-    auto const it = functions_.find(lower(name));
+    auto const it = functions_.find(key_of(space, name));
     return it == functions_.end() ? nullptr : &it->second;
 }
 
